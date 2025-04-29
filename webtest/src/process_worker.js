@@ -21,7 +21,18 @@ self.onmessage = async (e) => {
                 receiver_sab,
                 sender_sab
             );
+
+            // get the output_data_sab
+            const output_data_bytes = new Uint32Array(output_data_sab);
+            const result = output_data_bytes[0];
+
+            console.log('Process worker finished');
+            // e.data.type is 'result'
+            // e.data.result is the result
+            self.postMessage({ type: 'result', result: result });
         } catch (error) {
+            console.error('Process worker error', error);
+            self.postMessage({ type: 'error', error: error });
         }
     }
 }; 
