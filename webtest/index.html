@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU Example</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #status {
+            padding: 10px;
+            border-radius: 4px;
+            background-color: #f0f0f0;
+        }
+        #result {
+            white-space: pre-wrap;
+            font-family: monospace;
+            padding: 10px;
+            background-color: #f8f8f8;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WebGPU Example</h1>
+        <div id="status">Status: Ready</div>
+        <button id="startButton">Start Task</button>
+        <div id="result"></div>
+    </div>
+
+    <script type="module">
+        const startButton = document.getElementById('startButton');
+        const statusDiv = document.getElementById('status');
+        const resultDiv = document.getElementById('result');
+
+        // Create web worker
+        const worker = new Worker(new URL("./worker.js", import.meta.url), { type: 'module' });
+
+        // Handle web worker messages
+        worker.onmessage = (e) => {
+            if (e.data === 'done') {
+                statusDiv.textContent = 'Status: Completed';
+                startButton.disabled = false;
+            } else if (e.data === 'error') {
+                statusDiv.textContent = 'Status: Error occurred';
+                startButton.disabled = false;
+            }
+        };
+
+        // Start button click event
+        startButton.addEventListener('click', () => {
+            statusDiv.textContent = 'Status: Running...';
+            startButton.disabled = true;
+            worker.postMessage('start');
+        });
+    </script>
+</body>
+</html>
