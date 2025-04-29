@@ -2,21 +2,6 @@ use js_sys::{Atomics, Int32Array};
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
-
 #[wasm_bindgen]
 pub async fn run(
     input_data_sab: &js_sys::SharedArrayBuffer,
@@ -27,12 +12,6 @@ pub async fn run(
     console::log_1(&"run: WebGPU function called".into());
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
     console_log::init_with_level(log::Level::Warn).expect("Couldn't initialize logger");
-
-    // want to log the address of the input_data_sab, output_data_sab, receiver_sab, sender_sab
-    console::log_1(&format!("run: input_data_sab: {:?}", input_data_sab).into());
-    console::log_1(&format!("run: output_data_sab: {:?}", output_data_sab).into());
-    console::log_1(&format!("run: receiver_sab: {:?}", receiver_sab).into());
-    console::log_1(&format!("run: sender_sab: {:?}", sender_sab).into());
 
     let instance = wgpu::Instance::default();
     let adapter = instance
@@ -144,21 +123,22 @@ pub async fn run(
         label: None,
     });
 
-    let receiver_state = Int32Array::new(receiver_sab);
-    let sender_state = Int32Array::new(sender_sab);
+    let request_flag = Int32Array::new(sender_sab);
+    let response_flag = Int32Array::new(receiver_sab);
+
     let input_data_bytes = js_sys::Uint32Array::new(input_data_sab);
     let output_data_bytes = js_sys::Uint32Array::new(output_data_sab);
 
     loop {
-        console::log_1(&"run: Waiting for receiver".into());
-        // Wait for receiver
-        while Atomics::load(&receiver_state, 0).unwrap() == 0 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        console::log_1(&"run: Atomics.wait on receiver_state".into());
+        let outcome = Atomics::wait(&request_flag, 0, 0).unwrap();
+        console::log_1(&format!("run: Atomics.wait returned {:?}", outcome).into());
 
         // Get input data
         let mut input_data = [0u32; 2];
         input_data_bytes.copy_to(&mut input_data);
+
+        console::log_1(&format!("run: input_data: {:?}", input_data).into());
 
         // Create command encoder
         let mut encoder =
@@ -194,13 +174,15 @@ pub async fn run(
         if let Some(Ok(())) = receiver.receive().await {
             let data = output_slice.get_mapped_range();
             let result = bytemuck::cast_slice::<u8, u32>(&data);
+            console::log_1(&format!("run: result: {:?}", result).into());
             output_data_bytes.copy_from(&result);
         }
 
+        Atomics::store(&request_flag, 0, 0).unwrap();
+
         // Reset receiver state and notify sender
-        Atomics::store(&receiver_state, 0, 0).expect("Failed to store receiver state");
-        Atomics::store(&sender_state, 0, 1).expect("Failed to store sender state");
-        Atomics::notify(&sender_state, 0).expect("Failed to notify sender");
+        Atomics::store(&response_flag, 0, 1).unwrap();
+        Atomics::notify(&response_flag, 0).unwrap();
     }
 }
 
@@ -214,35 +196,31 @@ pub fn process_data(
     sender_sab: &js_sys::SharedArrayBuffer,
 ) {
     console::log_1(&"process_data: Processing data in Rust".into());
+
     console::log_1(&format!("process_data: input1: {}, input2: {}", input1, input2).into());
-    console::log_1(&format!("process_data: input_data_sab: {:?}", input_data_sab).into());
-    console::log_1(&format!("process_data: output_data_sab: {:?}", output_data_sab).into());
-    console::log_1(&format!("process_data: receiver_sab: {:?}", receiver_sab).into());
-    console::log_1(&format!("process_data: sender_sab: {:?}", sender_sab).into());
+
     let input_data_bytes = js_sys::Uint32Array::new(input_data_sab);
     let output_data_bytes = js_sys::Uint32Array::new(output_data_sab);
-    let receiver_state = Int32Array::new(receiver_sab);
-    let sender_state = Int32Array::new(sender_sab);
+    let request_flag = Int32Array::new(sender_sab);
+    let response_flag = Int32Array::new(receiver_sab);
 
-    // 입력 데이터를 SharedArrayBuffer에 복사
+    // Copy input data to SharedArrayBuffer
     input_data_bytes.set_index(0, input1);
     input_data_bytes.set_index(1, input2);
 
-    // sender에게 알림
-    Atomics::store(&sender_state, 0, 1).expect("Failed to store sender state");
-    Atomics::notify(&sender_state, 0).expect("Failed to notify sender");
-    console::log_1(&"process_data: Notified sender".into());
+    // 1) Write value to send to GPU worker
+    Atomics::store(&request_flag, 0, 1).unwrap();
+    // 2) Wake up worker with notify
+    Atomics::notify(&request_flag, 0).unwrap();
 
-    // receiver 대기
-    console::log_1(&"process_data: Waiting for receiver".into());
-    while Atomics::load(&receiver_state, 0).unwrap() == 0 {
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    console::log_1(&"process_data: Receiver notified".into());
-    // 결과 읽기
+    console::log_1(&"process_data: Atomics.wait on receiver_state".into());
+    let outcome = Atomics::wait(&response_flag, 0, 0).unwrap();
+    console::log_1(&format!("process_data: Atomics.wait returned {:?}", outcome).into());
+
+    // Read result
     let result = output_data_bytes.get_index(0);
-    web_sys::console::log_1(&result.into());
+    console::log_1(&format!("process_data: result: {:?}", result).into());
 
-    // receiver 상태 초기화
-    Atomics::store(&receiver_state, 0, 0).expect("Failed to reset receiver state");
+    // Reset receiver state
+    Atomics::store(&response_flag, 0, 0).expect("Failed to reset receiver state");
 }

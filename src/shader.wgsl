@@ -14,7 +14,7 @@ var<storage, read_write> output: Output;
 
 @compute @workgroup_size(1)
 fn main() {
-    let a = input.data[1];
-    let b = input.data[2];
-    output.data[3] = a + b;
+    let a = input.data[0];
+    let b = input.data[1];
+    output.data[0] = a + b;
 } 
