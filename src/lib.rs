@@ -58,14 +58,6 @@ pub async fn run(
         mapped_at_creation: false,
     });
 
-    // Create staging buffer
-    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: std::mem::size_of::<u32>() as u64,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
     // Create bind group
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
@@ -133,6 +125,14 @@ pub async fn run(
         console::log_1(&"run: Atomics.wait on receiver_state".into());
         let outcome = Atomics::wait(&request_flag, 0, 0).unwrap();
         console::log_1(&format!("run: Atomics.wait returned {:?}", outcome).into());
+
+        // Create staging buffer
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: std::mem::size_of::<u32>() as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         // Get input data
         let mut input_data = [0u32; 2];
