@@ -1,15 +1,21 @@
-use js_sys::{Atomics, Int32Array};
-use wasm_bindgen::prelude::*;
+use futures_intrusive::channel::shared::{channel, Receiver, Sender};
+use tokio::task::{spawn, spawn_blocking};
+
+use tokio_with_wasm::alias as tokio;
+use wasm_bindgen_test::*;
 use web_sys::console;
 
-#[wasm_bindgen]
-pub async fn run(
-    input_data_sab: &js_sys::SharedArrayBuffer,
-    output_data_sab: &js_sys::SharedArrayBuffer,
-    receiver_sab: &js_sys::SharedArrayBuffer,
-    sender_sab: &js_sys::SharedArrayBuffer,
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+const LENGTH: usize = 2;
+type Data = [u32; LENGTH];
+
+pub async fn run_with_channel(
+    req_rx: Receiver<Data>,
+    resp_tx: Sender<Data>,
+    initialize_tx: Sender<()>,
 ) {
-    console::log_1(&"run: WebGPU function called".into());
+    console::log_1(&"run_with_channel: WebGPU function called".into());
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
     console_log::init_with_level(log::Level::Warn).expect("Couldn't initialize logger");
 
@@ -115,17 +121,9 @@ pub async fn run(
         label: None,
     });
 
-    let request_flag = Int32Array::new(sender_sab);
-    let response_flag = Int32Array::new(receiver_sab);
-
-    let input_data_bytes = js_sys::Uint32Array::new(input_data_sab);
-    let output_data_bytes = js_sys::Uint32Array::new(output_data_sab);
-
-    loop {
-        console::log_1(&"run: Atomics.wait on receiver_state".into());
-        let outcome = Atomics::wait(&request_flag, 0, 0).unwrap();
-        console::log_1(&format!("run: Atomics.wait returned {:?}", outcome).into());
-
+    initialize_tx.send(()).await.unwrap();
+    console::log_1(&"run_with_channel: waiting for input".into());
+    while let Some(buf) = req_rx.receive().await {
         // Create staging buffer
         let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -134,18 +132,14 @@ pub async fn run(
             mapped_at_creation: false,
         });
 
-        // Get input data
-        let mut input_data = [0u32; 2];
-        input_data_bytes.copy_to(&mut input_data);
-
-        console::log_1(&format!("run: input_data: {:?}", input_data).into());
+        console::log_1(&format!("run_with_channel: input_data: {:?}", buf).into());
 
         // Create command encoder
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         // Copy input data
-        queue.write_buffer(&input_buffer, 0, bytemuck::cast_slice(&input_data));
+        queue.write_buffer(&input_buffer, 0, bytemuck::cast_slice(&buf));
 
         // Create compute pass
         {
@@ -161,7 +155,7 @@ pub async fn run(
         encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, staging_buffer.size());
 
         // Wait for the GPU to finish executing the command buffer
-        console::log_1(&"run: Waiting for GPU command buffer execution...".into());
+        console::log_1(&"run_with_channel: Waiting for GPU command buffer execution...".into());
         let command_buffer = encoder.finish();
         queue.submit(std::iter::once(command_buffer));
         device.poll(wgpu::Maintain::Wait);
@@ -174,53 +168,46 @@ pub async fn run(
         if let Some(Ok(())) = receiver.receive().await {
             let data = output_slice.get_mapped_range();
             let result = bytemuck::cast_slice::<u8, u32>(&data);
-            console::log_1(&format!("run: result: {:?}", result).into());
-            output_data_bytes.copy_from(&result);
+            console::log_1(&format!("run_with_channel: result: {:?}", result).into());
+            let mut result_buf: [u32; LENGTH] = [0, 0];
+            result_buf[0] = result[0];
+            resp_tx.send(result_buf).await.unwrap();
         }
-
-        Atomics::store(&request_flag, 0, 0).unwrap();
-
-        // Reset receiver state and notify sender
-        Atomics::store(&response_flag, 0, 1).unwrap();
-        Atomics::notify(&response_flag, 0).unwrap();
     }
 }
 
-#[wasm_bindgen]
-pub fn process_data(
-    input1: u32,
-    input2: u32,
-    input_data_sab: &js_sys::SharedArrayBuffer,
-    output_data_sab: &js_sys::SharedArrayBuffer,
-    receiver_sab: &js_sys::SharedArrayBuffer,
-    sender_sab: &js_sys::SharedArrayBuffer,
-) {
-    console::log_1(&"process_data: Processing data in Rust".into());
+pub fn request_data_sync(data: Data, req_tx: Sender<Data>, resp_rx: Receiver<Data>) -> Data {
+    console::log_1(&format!("request_data_sync: sending data").into());
+    let _ = pollster::block_on(req_tx.send(data));
+    console::log_1(&format!("request_data_sync: waiting for result").into());
+    let result: Data = pollster::block_on(resp_rx.receive()).unwrap();
+    console::log_1(&format!("request_data_sync: received result").into());
+    result
+}
 
-    console::log_1(&format!("process_data: input1: {}, input2: {}", input1, input2).into());
+#[wasm_bindgen_test]
+pub async fn prove_only_in_rust() {
+    let (runner_tx, runner_rx) = channel::<()>(1);
+    let (req_tx, req_rx) = channel::<Data>(1);
+    let (resp_tx, resp_rx) = channel::<Data>(1);
+    let thread_id = std::thread::current().id();
+    console::log_1(&format!("prove_only_in_rust: thread id: {:?}", thread_id).into());
 
-    let input_data_bytes = js_sys::Uint32Array::new(input_data_sab);
-    let output_data_bytes = js_sys::Uint32Array::new(output_data_sab);
-    let request_flag = Int32Array::new(sender_sab);
-    let response_flag = Int32Array::new(receiver_sab);
+    let _ = tokio::spawn(async move {
+        let thread_id = std::thread::current().id();
+        console::log_1(&format!("run_with_channel: thread id: {:?}", thread_id).into());
+        console::log_1(&format!("run_with_channel: start").into());
+        run_with_channel(req_rx, resp_tx, runner_tx).await;
+    });
 
-    // Copy input data to SharedArrayBuffer
-    input_data_bytes.set_index(0, input1);
-    input_data_bytes.set_index(1, input2);
+    let _ = runner_rx.receive().await;
+    console::log_1(&format!("prove_only_in_rust: runner spawned").into());
 
-    // 1) Write value to send to GPU worker
-    Atomics::store(&request_flag, 0, 1).unwrap();
-    // 2) Wake up worker with notify
-    Atomics::notify(&request_flag, 0).unwrap();
+    let mut data1: Data = [0; LENGTH];
+    data1[0] = 1;
+    data1[1] = 2;
+    let result1 = request_data_sync(data1, req_tx, resp_rx);
+    web_sys::console::log_1(&format!("prove_only_in_rust: {:?}", &result1[0]).into());
 
-    console::log_1(&"process_data: Atomics.wait on receiver_state".into());
-    let outcome = Atomics::wait(&response_flag, 0, 0).unwrap();
-    console::log_1(&format!("process_data: Atomics.wait returned {:?}", outcome).into());
-
-    // Read result
-    let result = output_data_bytes.get_index(0);
-    console::log_1(&format!("process_data: result: {:?}", result).into());
-
-    // Reset receiver state
-    Atomics::store(&response_flag, 0, 0).expect("Failed to reset receiver state");
+    console::log_1(&format!("prove_only_in_rust: end").into());
 }
