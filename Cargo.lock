@@ -1401,6 +1401,8 @@ dependencies = [
  "futures-intrusive",
  "log",
  "pollster",
+ "serde",
+ "serde_closure",
  "tokio",
  "tokio_with_wasm",
  "wasm-bindgen",

@@ -3,6 +3,8 @@ use tokio::task::{spawn, spawn_blocking};
 
 use tokio_with_wasm::alias as tokio;
 use wasm_bindgen_test::*;
+use wasm_mt::prelude::*;
+use wasm_mt::utils::run_js;
 use web_sys::console;
 
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -187,6 +189,14 @@ pub fn request_data_sync(data: Data, req_tx: Sender<Data>, resp_rx: Receiver<Dat
 
 #[wasm_bindgen_test]
 pub async fn prove_only_in_rust() {
+    // let href = run_js("return location.href;")
+    //     .unwrap()
+    //     .as_string()
+    //     .unwrap();
+    // console::log_1(&format!("prove_only_in_rust: href: {}", href).into());
+    // let mt = WasmMt::new(&href).and_init().await.unwrap();
+    // let _th = mt.thread().and_init().await.unwrap();
+
     let (runner_tx, runner_rx) = channel::<()>(1);
     let (req_tx, req_rx) = channel::<Data>(1);
     let (resp_tx, resp_rx) = channel::<Data>(1);
