@@ -1,13 +1,14 @@
 use futures_intrusive::channel::shared::{channel, Receiver, Sender};
-use tokio::task::{spawn, spawn_blocking};
 
+use std::{cell::OnceCell, sync::Arc};
 use tokio_with_wasm::alias as tokio;
 use wasm_bindgen_test::*;
-use wasm_mt::prelude::*;
-use wasm_mt::utils::run_js;
 use web_sys::console;
 
-wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+use wasm_bindgen::prelude::*;
+use wasm_bindgen_spawn::ThreadCreator;
+
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_worker);
 
 const LENGTH: usize = 2;
 type Data = [u32; LENGTH];
@@ -187,15 +188,48 @@ pub fn request_data_sync(data: Data, req_tx: Sender<Data>, resp_rx: Receiver<Dat
     result
 }
 
+thread_local! {
+    static THREAD_CREATOR: OnceCell<Arc<ThreadCreator>> = OnceCell::new();
+}
+
+pub async fn init_wasm_module() {
+    console_error_panic_hook::set_once();
+    let _thread_creator = ThreadCreator::new("wgpu_examples.wasm", "worker.js");
+
+    // THREAD_CREATOR.with(|cell| {
+    //     let _ = cell.set(Arc::new(thread_creator));
+    // });
+}
+
+fn thread_creator() -> Arc<ThreadCreator> {
+    THREAD_CREATOR.with(|cell| Arc::clone(cell.get().unwrap()))
+}
+
 #[wasm_bindgen_test]
 pub async fn prove_only_in_rust() {
-    // let href = run_js("return location.href;")
-    //     .unwrap()
-    //     .as_string()
-    //     .unwrap();
-    // console::log_1(&format!("prove_only_in_rust: href: {}", href).into());
-    // let mt = WasmMt::new(&href).and_init().await.unwrap();
-    // let _th = mt.thread().and_init().await.unwrap();
+    init_wasm_module().await;
+    //let tc = thread_creator();
+    // let mut handles = vec![];
+    // for i in 1..=5 {
+    //     console::log_1(&format!("spawning: {}", i).into());
+    //     let handle = tc
+    //         .spawn(move || {
+    //             console::log_1(&format!("Worker {} thread started", i).into());
+    //             if i == 2 {
+    //                 panic!("Hey, I'm 2 (this is a test panic)");
+    //             }
+    //             return i * 3;
+    //         })
+    //         .unwrap();
+    //     handles.push(handle);
+    // }
+
+    // for handle in handles {
+    //     match handle.join() {
+    //         Ok(value) => console::log_1(&format!("Worker thread returned: {}", value).into()),
+    //         Err(e) => console::log_1(&format!("Worker thread failed: {}", e).into()),
+    //     }
+    // }
 
     let (runner_tx, runner_rx) = channel::<()>(1);
     let (req_tx, req_rx) = channel::<Data>(1);

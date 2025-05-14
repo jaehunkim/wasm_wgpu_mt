@@ -23,3 +23,4 @@ tokio_with_wasm = { version = "0.8.2", features = ["rt"] }
 wasm-mt = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_closure = "0.3"
+wasm-bindgen-spawn = "0.0.1"
