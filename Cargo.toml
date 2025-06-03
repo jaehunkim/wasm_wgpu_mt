@@ -19,3 +19,4 @@ futures-intrusive = "0.5"
 async-channel = "2.3.1"
 wasm_thread = { git = "https://github.com/jaehunkim/wasm_thread", branch = "main" }
 tokio = { version = "1.25", features = ["rt"] }
+futures = "0.3.31"
