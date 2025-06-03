@@ -1,19 +1,23 @@
-use js_sys::{Atomics, Int32Array};
-use wasm_bindgen::prelude::*;
+use std::time::Duration;
+use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen_test::wasm_bindgen_test;
+use wasm_thread as thread;
 use web_sys::console;
 
-#[wasm_bindgen]
-pub async fn run(
-    input_data_sab: &js_sys::SharedArrayBuffer,
-    output_data_sab: &js_sys::SharedArrayBuffer,
-    receiver_sab: &js_sys::SharedArrayBuffer,
-    sender_sab: &js_sys::SharedArrayBuffer,
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
+pub async fn run_wgpu_worker(
+    job_request_rx: async_channel::Receiver<u32>,
+    job_result_tx: async_channel::Sender<u32>,
 ) {
     console::log_1(&"run: WebGPU function called".into());
-    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
-    console_log::init_with_level(log::Level::Warn).expect("Couldn't initialize logger");
+    //std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+    //console_log::init_with_level(log::Level::Warn).expect("Couldn't initialize logger");
 
     let instance = wgpu::Instance::default();
+    // log instance
+    console::log_1(&format!("run: instance: {:?}", instance).into());
+
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::default(),
@@ -22,6 +26,8 @@ pub async fn run(
         })
         .await
         .unwrap();
+
+    console::log_1(&format!("run: adapter: {:?}", adapter).into());
 
     let (device, queue) = adapter
         .request_device(
@@ -35,6 +41,8 @@ pub async fn run(
         )
         .await
         .unwrap();
+
+    console::log_1(&format!("run: device: {:?}", device).into());
 
     // WGSL shader code
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -115,112 +123,94 @@ pub async fn run(
         label: None,
     });
 
-    let request_flag = Int32Array::new(sender_sab);
-    let response_flag = Int32Array::new(receiver_sab);
+    console::log_1(&"run: Atomics.wait on receiver_state".into());
+    let requested_num = job_request_rx.recv().await.unwrap();
+    console::log_1(&format!("run: Atomics.wait returned {:?}", requested_num).into());
 
-    let input_data_bytes = js_sys::Uint32Array::new(input_data_sab);
-    let output_data_bytes = js_sys::Uint32Array::new(output_data_sab);
+    // Create staging buffer
+    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: std::mem::size_of::<u32>() as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
 
-    loop {
-        console::log_1(&"run: Atomics.wait on receiver_state".into());
-        let outcome = Atomics::wait(&request_flag, 0, 0).unwrap();
-        console::log_1(&format!("run: Atomics.wait returned {:?}", outcome).into());
+    // Get input data
+    let mut input_data = [0u32; 2];
+    input_data[0] = requested_num;
+    input_data[1] = requested_num;
 
-        // Create staging buffer
-        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+    console::log_1(&format!("run: input_data: {:?}", input_data).into());
+
+    // Create command encoder
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+    // Copy input data
+    queue.write_buffer(&input_buffer, 0, bytemuck::cast_slice(&input_data));
+
+    // Create compute pass
+    {
+        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: None,
-            size: std::mem::size_of::<u32>() as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+            timestamp_writes: None,
         });
-
-        // Get input data
-        let mut input_data = [0u32; 2];
-        input_data_bytes.copy_to(&mut input_data);
-
-        console::log_1(&format!("run: input_data: {:?}", input_data).into());
-
-        // Create command encoder
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-
-        // Copy input data
-        queue.write_buffer(&input_buffer, 0, bytemuck::cast_slice(&input_data));
-
-        // Create compute pass
-        {
-            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: None,
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(&compute_pipeline);
-            compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups(1, 1, 1);
-        }
-
-        encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, staging_buffer.size());
-
-        // Wait for the GPU to finish executing the command buffer
-        console::log_1(&"run: Waiting for GPU command buffer execution...".into());
-        let command_buffer = encoder.finish();
-        queue.submit(std::iter::once(command_buffer));
-        device.poll(wgpu::Maintain::Wait);
-
-        // Read results
-        let output_slice = staging_buffer.slice(..);
-        let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
-        output_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
-
-        if let Some(Ok(())) = receiver.receive().await {
-            let data = output_slice.get_mapped_range();
-            let result = bytemuck::cast_slice::<u8, u32>(&data);
-            console::log_1(&format!("run: result: {:?}", result).into());
-            output_data_bytes.copy_from(&result);
-        }
-
-        Atomics::store(&request_flag, 0, 0).unwrap();
-
-        // Reset receiver state and notify sender
-        Atomics::store(&response_flag, 0, 1).unwrap();
-        Atomics::notify(&response_flag, 0).unwrap();
+        compute_pass.set_pipeline(&compute_pipeline);
+        compute_pass.set_bind_group(0, &bind_group, &[]);
+        compute_pass.dispatch_workgroups(1, 1, 1);
     }
+
+    encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, staging_buffer.size());
+
+    // Wait for the GPU to finish executing the command buffer
+    console::log_1(&"run: Waiting for GPU command buffer execution...".into());
+    let command_buffer = encoder.finish();
+    queue.submit(std::iter::once(command_buffer));
+    device.poll(wgpu::Maintain::Wait);
+
+    // Read results
+    let output_slice = staging_buffer.slice(..);
+    let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
+    output_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+
+    let mut result = 0;
+    if let Some(Ok(())) = receiver.receive().await {
+        let data = output_slice.get_mapped_range();
+        let result_arr = bytemuck::cast_slice::<u8, u32>(&data);
+        result = result_arr[0];
+        console::log_1(&format!("run: result: {:?}", result).into());
+    }
+
+    job_result_tx.send(result).await.unwrap();
 }
 
-#[wasm_bindgen]
-pub fn process_data(
-    input1: u32,
-    input2: u32,
-    input_data_sab: &js_sys::SharedArrayBuffer,
-    output_data_sab: &js_sys::SharedArrayBuffer,
-    receiver_sab: &js_sys::SharedArrayBuffer,
-    sender_sab: &js_sys::SharedArrayBuffer,
-) {
-    console::log_1(&"process_data: Processing data in Rust".into());
+#[wasm_bindgen_test]
+pub async fn test_run_runner() {
+    let (job_request_tx, job_request_rx) = async_channel::unbounded::<u32>();
+    let (job_result_tx, job_result_rx) = async_channel::unbounded::<u32>();
+    let (all_job_done_tx, all_job_done_rx) = async_channel::unbounded::<()>();
 
-    console::log_1(&format!("process_data: input1: {}, input2: {}", input1, input2).into());
+    thread::spawn(move || {
+        spawn_local(async move {
+            run_wgpu_worker(job_request_rx, job_result_tx).await;
+        });
+    });
 
-    let input_data_bytes = js_sys::Uint32Array::new(input_data_sab);
-    let output_data_bytes = js_sys::Uint32Array::new(output_data_sab);
-    let request_flag = Int32Array::new(sender_sab);
-    let response_flag = Int32Array::new(receiver_sab);
+    tokio::task::yield_now().await;
 
-    // Copy input data to SharedArrayBuffer
-    input_data_bytes.set_index(0, input1);
-    input_data_bytes.set_index(1, input2);
+    thread::spawn(move || {
+        spawn_local(async move {
+            thread::sleep(Duration::from_millis(1000));
+            job_request_tx.send(1).await.unwrap();
 
-    // 1) Write value to send to GPU worker
-    Atomics::store(&request_flag, 0, 1).unwrap();
-    // 2) Wake up worker with notify
-    Atomics::notify(&request_flag, 0).unwrap();
+            let result = job_result_rx.recv().await.unwrap();
+            console::log_1(&format!("first spawn_local result: {:?}", result).into());
 
-    console::log_1(&"process_data: Atomics.wait on receiver_state".into());
-    let outcome = Atomics::wait(&response_flag, 0, 0).unwrap();
-    console::log_1(&format!("process_data: Atomics.wait returned {:?}", outcome).into());
+            all_job_done_tx.send(()).await.unwrap();
+        });
+    });
 
-    // Read result
-    let result = output_data_bytes.get_index(0);
-    console::log_1(&format!("process_data: result: {:?}", result).into());
-
-    // Reset receiver state
-    Atomics::store(&response_flag, 0, 0).expect("Failed to reset receiver state");
+    console::log_1(&"main end".into());
+    all_job_done_rx.recv().await.unwrap();
+    thread::terminate_all_workers();
 }

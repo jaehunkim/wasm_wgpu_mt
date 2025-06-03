@@ -19,3 +19,8 @@ console_error_panic_hook = "0.1"
 console_log = "0.2"
 futures-intrusive = "0.5"
 js-sys = "0.3.77"
+futures = "0.3"
+async-channel = "2.3.1"
+wasm_thread = { git = "https://github.com/jaehunkim/wasm_thread", branch = "main" }
+wasm-bindgen-test = "0.3.43"
+tokio = { version = "1.25", features = ["rt"] }
