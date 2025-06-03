@@ -196,6 +196,7 @@ pub async fn test_run_runner() {
     tokio::task::yield_now().await;
 
     thread::spawn(move || {
+        // below blocking should be called from worker thread, not main thread
         futures::executor::block_on(async move {
             thread::sleep(Duration::from_millis(1000));
             job_request_tx.send(1).await.unwrap();
