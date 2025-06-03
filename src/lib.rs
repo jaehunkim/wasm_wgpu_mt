@@ -11,11 +11,8 @@ pub async fn run_wgpu_worker(
     job_result_tx: async_channel::Sender<u32>,
 ) {
     console::log_1(&"run: WebGPU function called".into());
-    //std::panic::set_hook(Box::new(console_error_panic_hook::hook));
-    //console_log::init_with_level(log::Level::Warn).expect("Couldn't initialize logger");
 
     let instance = wgpu::Instance::default();
-    // log instance
     console::log_1(&format!("run: instance: {:?}", instance).into());
 
     let adapter = instance
@@ -123,9 +120,9 @@ pub async fn run_wgpu_worker(
         label: None,
     });
 
-    console::log_1(&"run: Atomics.wait on receiver_state".into());
+    console::log_1(&"run: job_request_rx on receiver_state".into());
     let requested_num = job_request_rx.recv().await.unwrap();
-    console::log_1(&format!("run: Atomics.wait returned {:?}", requested_num).into());
+    console::log_1(&format!("run: job_request_rx returned {:?}", requested_num).into());
 
     // Create staging buffer
     let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -204,7 +201,7 @@ pub async fn test_run_runner() {
             job_request_tx.send(1).await.unwrap();
 
             let result = job_result_rx.recv().await.unwrap();
-            console::log_1(&format!("first spawn_local result: {:?}", result).into());
+            console::log_1(&format!("result: {:?}", result).into());
 
             all_job_done_tx.send(()).await.unwrap();
         });
