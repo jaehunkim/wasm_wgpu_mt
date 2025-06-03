@@ -1,27 +1,20 @@
-use futures_intrusive::channel::shared::{channel, Receiver, Sender};
-use tokio::task::{spawn, spawn_blocking};
-
-use tokio_with_wasm::alias as tokio;
-use wasm_bindgen_test::*;
-use wasm_mt::prelude::*;
-use wasm_mt::utils::run_js;
+use std::time::Duration;
+use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen_test::wasm_bindgen_test;
+use wasm_thread as thread;
 use web_sys::console;
 
-wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
-const LENGTH: usize = 2;
-type Data = [u32; LENGTH];
-
-pub async fn run_with_channel(
-    req_rx: Receiver<Data>,
-    resp_tx: Sender<Data>,
-    initialize_tx: Sender<()>,
+pub async fn run_wgpu_worker(
+    job_request_rx: async_channel::Receiver<u32>,
+    job_result_tx: async_channel::Sender<u32>,
 ) {
-    console::log_1(&"run_with_channel: WebGPU function called".into());
-    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
-    console_log::init_with_level(log::Level::Warn).expect("Couldn't initialize logger");
+    console::log_1(&"run: WebGPU function called".into());
 
     let instance = wgpu::Instance::default();
+    console::log_1(&format!("run: instance: {:?}", instance).into());
+
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::default(),
@@ -30,6 +23,8 @@ pub async fn run_with_channel(
         })
         .await
         .unwrap();
+
+    console::log_1(&format!("run: adapter: {:?}", adapter).into());
 
     let (device, queue) = adapter
         .request_device(
@@ -43,6 +38,8 @@ pub async fn run_with_channel(
         )
         .await
         .unwrap();
+
+    console::log_1(&format!("run: device: {:?}", device).into());
 
     // WGSL shader code
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -123,101 +120,94 @@ pub async fn run_with_channel(
         label: None,
     });
 
-    initialize_tx.send(()).await.unwrap();
-    console::log_1(&"run_with_channel: waiting for input".into());
-    while let Some(buf) = req_rx.receive().await {
-        // Create staging buffer
-        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+    console::log_1(&"run: job_request_rx on receiver_state".into());
+    let requested_num = job_request_rx.recv().await.unwrap();
+    console::log_1(&format!("run: job_request_rx returned {:?}", requested_num).into());
+
+    // Create staging buffer
+    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: std::mem::size_of::<u32>() as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    // Get input data
+    let mut input_data = [0u32; 2];
+    input_data[0] = requested_num;
+    input_data[1] = requested_num;
+
+    console::log_1(&format!("run: input_data: {:?}", input_data).into());
+
+    // Create command encoder
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+    // Copy input data
+    queue.write_buffer(&input_buffer, 0, bytemuck::cast_slice(&input_data));
+
+    // Create compute pass
+    {
+        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: None,
-            size: std::mem::size_of::<u32>() as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+            timestamp_writes: None,
         });
-
-        console::log_1(&format!("run_with_channel: input_data: {:?}", buf).into());
-
-        // Create command encoder
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-
-        // Copy input data
-        queue.write_buffer(&input_buffer, 0, bytemuck::cast_slice(&buf));
-
-        // Create compute pass
-        {
-            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: None,
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(&compute_pipeline);
-            compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups(1, 1, 1);
-        }
-
-        encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, staging_buffer.size());
-
-        // Wait for the GPU to finish executing the command buffer
-        console::log_1(&"run_with_channel: Waiting for GPU command buffer execution...".into());
-        let command_buffer = encoder.finish();
-        queue.submit(std::iter::once(command_buffer));
-        device.poll(wgpu::Maintain::Wait);
-
-        // Read results
-        let output_slice = staging_buffer.slice(..);
-        let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
-        output_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
-
-        if let Some(Ok(())) = receiver.receive().await {
-            let data = output_slice.get_mapped_range();
-            let result = bytemuck::cast_slice::<u8, u32>(&data);
-            console::log_1(&format!("run_with_channel: result: {:?}", result).into());
-            let mut result_buf: [u32; LENGTH] = [0, 0];
-            result_buf[0] = result[0];
-            resp_tx.send(result_buf).await.unwrap();
-        }
+        compute_pass.set_pipeline(&compute_pipeline);
+        compute_pass.set_bind_group(0, &bind_group, &[]);
+        compute_pass.dispatch_workgroups(1, 1, 1);
     }
-}
 
-pub fn request_data_sync(data: Data, req_tx: Sender<Data>, resp_rx: Receiver<Data>) -> Data {
-    console::log_1(&format!("request_data_sync: sending data").into());
-    let _ = pollster::block_on(req_tx.send(data));
-    console::log_1(&format!("request_data_sync: waiting for result").into());
-    let result: Data = pollster::block_on(resp_rx.receive()).unwrap();
-    console::log_1(&format!("request_data_sync: received result").into());
-    result
+    encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, staging_buffer.size());
+
+    // Wait for the GPU to finish executing the command buffer
+    console::log_1(&"run: Waiting for GPU command buffer execution...".into());
+    let command_buffer = encoder.finish();
+    queue.submit(std::iter::once(command_buffer));
+    device.poll(wgpu::Maintain::Wait);
+
+    // Read results
+    let output_slice = staging_buffer.slice(..);
+    let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
+    output_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+
+    let mut result = 0;
+    if let Some(Ok(())) = receiver.receive().await {
+        let data = output_slice.get_mapped_range();
+        let result_arr = bytemuck::cast_slice::<u8, u32>(&data);
+        result = result_arr[0];
+        console::log_1(&format!("run: result: {:?}", result).into());
+    }
+
+    job_result_tx.send(result).await.unwrap();
 }
 
 #[wasm_bindgen_test]
-pub async fn prove_only_in_rust() {
-    // let href = run_js("return location.href;")
-    //     .unwrap()
-    //     .as_string()
-    //     .unwrap();
-    // console::log_1(&format!("prove_only_in_rust: href: {}", href).into());
-    // let mt = WasmMt::new(&href).and_init().await.unwrap();
-    // let _th = mt.thread().and_init().await.unwrap();
+pub async fn test_run_runner() {
+    let (job_request_tx, job_request_rx) = async_channel::unbounded::<u32>();
+    let (job_result_tx, job_result_rx) = async_channel::unbounded::<u32>();
+    let (all_job_done_tx, all_job_done_rx) = async_channel::unbounded::<()>();
 
-    let (runner_tx, runner_rx) = channel::<()>(1);
-    let (req_tx, req_rx) = channel::<Data>(1);
-    let (resp_tx, resp_rx) = channel::<Data>(1);
-    let thread_id = std::thread::current().id();
-    console::log_1(&format!("prove_only_in_rust: thread id: {:?}", thread_id).into());
-
-    let _ = tokio::spawn(async move {
-        let thread_id = std::thread::current().id();
-        console::log_1(&format!("run_with_channel: thread id: {:?}", thread_id).into());
-        console::log_1(&format!("run_with_channel: start").into());
-        run_with_channel(req_rx, resp_tx, runner_tx).await;
+    thread::spawn(move || {
+        spawn_local(async move {
+            run_wgpu_worker(job_request_rx, job_result_tx).await;
+        });
     });
 
-    let _ = runner_rx.receive().await;
-    console::log_1(&format!("prove_only_in_rust: runner spawned").into());
+    tokio::task::yield_now().await;
 
-    let mut data1: Data = [0; LENGTH];
-    data1[0] = 1;
-    data1[1] = 2;
-    let result1 = request_data_sync(data1, req_tx, resp_rx);
-    web_sys::console::log_1(&format!("prove_only_in_rust: {:?}", &result1[0]).into());
+    thread::spawn(move || {
+        spawn_local(async move {
+            thread::sleep(Duration::from_millis(1000));
+            job_request_tx.send(1).await.unwrap();
 
-    console::log_1(&format!("prove_only_in_rust: end").into());
+            let result = job_result_rx.recv().await.unwrap();
+            console::log_1(&format!("result: {:?}", result).into());
+
+            all_job_done_tx.send(()).await.unwrap();
+        });
+    });
+
+    console::log_1(&"main end".into());
+    all_job_done_rx.recv().await.unwrap();
+    thread::terminate_all_workers();
 }
