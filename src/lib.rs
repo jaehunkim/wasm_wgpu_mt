@@ -196,7 +196,7 @@ pub async fn test_run_runner() {
     tokio::task::yield_now().await;
 
     thread::spawn(move || {
-        spawn_local(async move {
+        futures::executor::block_on(async move {
             thread::sleep(Duration::from_millis(1000));
             job_request_tx.send(1).await.unwrap();
 
@@ -209,5 +209,5 @@ pub async fn test_run_runner() {
 
     console::log_1(&"main end".into());
     all_job_done_rx.recv().await.unwrap();
-    thread::terminate_all_workers();
+    wasm_thread::terminate_all_workers();
 }
