@@ -195,16 +195,18 @@ pub async fn test_run_runner() {
 
     thread::spawn(move || {
         // below blocking should be called from worker thread, not main thread
-        thread::sleep(Duration::from_millis(1000));
-        job_request_tx.send(1).unwrap();
-
-        let result = job_result_rx.recv().unwrap();
-        console::log_1(&format!("result: {:?}", result).into());
-
+        mock_sync_prove_fn(job_request_tx, job_result_rx);
         all_job_done_tx.send(()).unwrap();
     });
 
-    console::log_1(&"main end".into());
     all_job_done_rx.recv_async().await.unwrap();
     wasm_thread::terminate_all_workers();
+}
+
+fn mock_sync_prove_fn(job_request_tx: flume::Sender<u32>, job_result_rx: flume::Receiver<u32>) {
+    thread::sleep(Duration::from_millis(1000));
+    job_request_tx.send(1).unwrap();
+
+    let result = job_result_rx.recv().unwrap();
+    console::log_1(&format!("result: {:?}", result).into());
 }
