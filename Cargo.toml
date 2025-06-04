@@ -15,4 +15,3 @@ wasm-bindgen-test = "0.3.43"
 web-sys = { version = "0.3", features = ["console", "Performance", "Window"] }
 wasm_thread = { git = "https://github.com/jaehunkim/wasm_thread", branch = "main" }
 flume = "0.11.0"
-pollster = "0.3.0"
