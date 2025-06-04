@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_test::wasm_bindgen_test;
 use wasm_thread as thread;
@@ -7,8 +7,8 @@ use web_sys::console;
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
 pub async fn run_wgpu_worker(
-    job_request_rx: flume::Receiver<u32>,
-    job_result_tx: flume::Sender<u32>,
+    job_request_rx: flume::Receiver<Arc<u32>>,
+    job_result_tx: flume::Sender<Arc<u32>>,
 ) {
     console::log_1(&"run: WebGPU function called".into());
 
@@ -134,8 +134,8 @@ pub async fn run_wgpu_worker(
 
     // Get input data
     let mut input_data = [0u32; 2];
-    input_data[0] = requested_num;
-    input_data[1] = requested_num;
+    input_data[0] = *requested_num;
+    input_data[1] = *requested_num;
 
     console::log_1(&format!("run: input_data: {:?}", input_data).into());
 
@@ -178,22 +178,26 @@ pub async fn run_wgpu_worker(
         console::log_1(&format!("run: result: {:?}", result).into());
     }
 
-    job_result_tx.send(result).unwrap();
+    job_result_tx.send(Arc::new(result)).unwrap();
 }
 
 #[wasm_bindgen_test]
 pub async fn test_run_runner() {
-    let (job_request_tx, job_request_rx) = flume::bounded::<u32>(1);
-    let (job_result_tx, job_result_rx) = flume::bounded::<u32>(1);
+    let (job_request_tx, job_request_rx) = flume::bounded::<Arc<u32>>(1);
+    let (job_result_tx, job_result_rx) = flume::bounded::<Arc<u32>>(1);
     let (all_job_done_tx, all_job_done_rx) = flume::bounded::<()>(1);
 
     thread::spawn(move || {
+        let thread_id = thread::current().id();
+        console::log_1(&format!("run_wgpu_worker: thread_id: {:?}", thread_id).into());
         spawn_local(async move {
             run_wgpu_worker(job_request_rx, job_result_tx).await;
         });
     });
 
     thread::spawn(move || {
+        let thread_id = thread::current().id();
+        console::log_1(&format!("mock_sync_prove_fn: thread_id: {:?}", thread_id).into());
         // below blocking should be called from worker thread, not main thread
         mock_sync_prove_fn(job_request_tx, job_result_rx);
         all_job_done_tx.send(()).unwrap();
@@ -203,9 +207,12 @@ pub async fn test_run_runner() {
     wasm_thread::terminate_all_workers();
 }
 
-fn mock_sync_prove_fn(job_request_tx: flume::Sender<u32>, job_result_rx: flume::Receiver<u32>) {
+fn mock_sync_prove_fn(
+    job_request_tx: flume::Sender<Arc<u32>>,
+    job_result_rx: flume::Receiver<Arc<u32>>,
+) {
     thread::sleep(Duration::from_millis(1000));
-    job_request_tx.send(1).unwrap();
+    job_request_tx.send(Arc::new(1)).unwrap();
 
     let result = job_result_rx.recv().unwrap();
     console::log_1(&format!("result: {:?}", result).into());
