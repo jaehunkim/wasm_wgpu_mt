@@ -1083,7 +1083,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "flume",
- "futures",
  "pollster",
  "wasm-bindgen",
  "wasm-bindgen-futures",
