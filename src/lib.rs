@@ -7,8 +7,8 @@ use web_sys::console;
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
 pub async fn run_wgpu_worker(
-    job_request_rx: async_channel::Receiver<u32>,
-    job_result_tx: async_channel::Sender<u32>,
+    job_request_rx: flume::Receiver<u32>,
+    job_result_tx: flume::Sender<u32>,
 ) {
     console::log_1(&"run: WebGPU function called".into());
 
@@ -121,7 +121,7 @@ pub async fn run_wgpu_worker(
     });
 
     console::log_1(&"run: job_request_rx on receiver_state".into());
-    let requested_num = job_request_rx.recv().await.unwrap();
+    let requested_num = job_request_rx.recv().unwrap();
     console::log_1(&format!("run: job_request_rx returned {:?}", requested_num).into());
 
     // Create staging buffer
@@ -167,25 +167,25 @@ pub async fn run_wgpu_worker(
 
     // Read results
     let output_slice = staging_buffer.slice(..);
-    let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
+    let (sender, receiver) = flume::bounded(1);
     output_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
 
     let mut result = 0;
-    if let Some(Ok(())) = receiver.receive().await {
+    if let Ok(_) = receiver.recv_async().await {
         let data = output_slice.get_mapped_range();
         let result_arr = bytemuck::cast_slice::<u8, u32>(&data);
         result = result_arr[0];
         console::log_1(&format!("run: result: {:?}", result).into());
     }
 
-    job_result_tx.send(result).await.unwrap();
+    job_result_tx.send(result).unwrap();
 }
 
 #[wasm_bindgen_test]
 pub async fn test_run_runner() {
-    let (job_request_tx, job_request_rx) = async_channel::unbounded::<u32>();
-    let (job_result_tx, job_result_rx) = async_channel::unbounded::<u32>();
-    let (all_job_done_tx, all_job_done_rx) = async_channel::unbounded::<()>();
+    let (job_request_tx, job_request_rx) = flume::bounded::<u32>(1);
+    let (job_result_tx, job_result_rx) = flume::bounded::<u32>(1);
+    let (all_job_done_tx, all_job_done_rx) = flume::bounded::<()>(1);
 
     thread::spawn(move || {
         spawn_local(async move {
@@ -193,22 +193,20 @@ pub async fn test_run_runner() {
         });
     });
 
-    tokio::task::yield_now().await;
-
     thread::spawn(move || {
         // below blocking should be called from worker thread, not main thread
-        futures::executor::block_on(async move {
+        pollster::block_on(async move {
             thread::sleep(Duration::from_millis(1000));
-            job_request_tx.send(1).await.unwrap();
+            job_request_tx.send(1).unwrap();
 
-            let result = job_result_rx.recv().await.unwrap();
+            let result = job_result_rx.recv().unwrap();
             console::log_1(&format!("result: {:?}", result).into());
 
-            all_job_done_tx.send(()).await.unwrap();
+            all_job_done_tx.send(()).unwrap();
         });
     });
 
     console::log_1(&"main end".into());
-    all_job_done_rx.recv().await.unwrap();
+    all_job_done_rx.recv_async().await.unwrap();
     wasm_thread::terminate_all_workers();
 }
